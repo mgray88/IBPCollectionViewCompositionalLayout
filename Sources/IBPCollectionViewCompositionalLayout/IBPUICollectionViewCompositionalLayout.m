@@ -28,6 +28,8 @@
     NSMutableDictionary<NSNumber *, IBPCollectionViewOrthogonalScrollerSectionController *> *orthogonalScrollerSectionControllers;
 
     NSMutableArray<IBPCollectionCompositionalLayoutSolver *> *solvers;
+
+    NSMutableArray<NSIndexPath *> *calculatedEstimates;
 }
 
 @property (nonatomic, copy) IBPNSCollectionLayoutSection *layoutSection;
@@ -97,6 +99,7 @@
         layoutAttributesForPinnedSupplementaryItems = [[NSMutableArray alloc] init];
         orthogonalScrollerSectionControllers = [[NSMutableDictionary alloc] init];
         solvers = [[NSMutableArray alloc] init];
+        calculatedEstimates = [[NSMutableArray alloc] init];
     }
     return self;
 }
@@ -122,6 +125,7 @@
     [orthogonalScrollerSectionControllers removeAllObjects];
 
     [solvers removeAllObjects];
+    [calculatedEstimates removeAllObjects];
 }
 
 - (void)prepareLayout {
@@ -595,7 +599,7 @@
         NSIndexPath *indexPath = attributes.indexPath;
         IBPNSCollectionLayoutItem *layoutItem = [solvers[indexPath.section] layoutItemAtIndexPath:indexPath];
         IBPNSCollectionLayoutSize *layoutSize = layoutItem.layoutSize;
-        if (layoutSize.widthDimension.isEstimated || layoutSize.heightDimension.isEstimated) {
+        if ((layoutSize.widthDimension.isEstimated || layoutSize.heightDimension.isEstimated) && [calculatedEstimates containsObject:indexPath] == NO) {
             UICollectionViewCell *cell = [self.collectionView.dataSource collectionView:self.collectionView cellForItemAtIndexPath:attributes.indexPath];
             if (cell) {
                 CGSize containerSize = self.collectionViewContentSize;
@@ -667,6 +671,7 @@
                     [layoutAttributes addObject:attributes];
                 }];
 
+                [calculatedEstimates addObject:indexPath];
                 continue;
             }
         }
