@@ -28,6 +28,8 @@
     NSMutableDictionary<NSNumber *, IBPCollectionViewOrthogonalScrollerSectionController *> *orthogonalScrollerSectionControllers;
 
     NSMutableArray<IBPCollectionCompositionalLayoutSolver *> *solvers;
+
+    NSMutableArray<NSIndexPath *> *calculatedEstimates;
 }
 
 @property (nonatomic, copy) IBPNSCollectionLayoutSection *layoutSection;
@@ -97,6 +99,7 @@
         layoutAttributesForPinnedSupplementaryItems = [[NSMutableArray alloc] init];
         orthogonalScrollerSectionControllers = [[NSMutableDictionary alloc] init];
         solvers = [[NSMutableArray alloc] init];
+        calculatedEstimates = [[NSMutableArray alloc] init];
     }
     return self;
 }
@@ -122,6 +125,7 @@
     [orthogonalScrollerSectionControllers removeAllObjects];
 
     [solvers removeAllObjects];
+    [calculatedEstimates removeAllObjects];
 }
 
 - (void)prepareLayout {
@@ -577,25 +581,36 @@
 
 - (NSArray<UICollectionViewLayoutAttributes *> *)layoutAttributesForElementsInRect:(CGRect)rect {
     NSMutableArray<UICollectionViewLayoutAttributes *> *layoutAttributes = [[NSMutableArray alloc] init];
-    NSArray *itemAttributes = [cachedItemAttributes.allValues sortedArrayUsingComparator:^NSComparisonResult(UICollectionViewLayoutAttributes * _Nonnull attrs1, UICollectionViewLayoutAttributes * _Nonnull attrs2) {
+    
+    NSComparisonResult (^attributeComparator)(UICollectionViewLayoutAttributes *, UICollectionViewLayoutAttributes *) = ^NSComparisonResult(UICollectionViewLayoutAttributes * _Nonnull attrs1, UICollectionViewLayoutAttributes * _Nonnull attrs2) {
         switch (self.scrollDirection) {
             case UICollectionViewScrollDirectionVertical:
                 return CGRectGetMinY(attrs1.frame) > CGRectGetMinY(attrs2.frame);
             case UICollectionViewScrollDirectionHorizontal:
                 return CGRectGetMinX(attrs1.frame) > CGRectGetMinX(attrs2.frame);
         }
-    }];
+    };
 
-    for (NSInteger i = 0; i < itemAttributes.count; i++) {
-        UICollectionViewLayoutAttributes *attributes = itemAttributes[i];
+    NSArray *supplementaryAttributes = cachedSupplementaryAttributes.allValues;
+    NSArray *itemAttributes = cachedItemAttributes.allValues;
+
+    NSArray *allAttributes = [[itemAttributes arrayByAddingObjectsFromArray:supplementaryAttributes] sortedArrayUsingComparator:attributeComparator];
+
+    for (NSInteger i = 0; i < allAttributes.count; i++) {
+        UICollectionViewLayoutAttributes *attributes = allAttributes[i];
         if (!CGRectIntersectsRect(attributes.frame, rect)) {
+            continue;
+        }
+
+        // Currently only cells can have estimated sizes
+        if (attributes.representedElementCategory != UICollectionElementCategoryCell) {
             continue;
         }
 
         NSIndexPath *indexPath = attributes.indexPath;
         IBPNSCollectionLayoutItem *layoutItem = [solvers[indexPath.section] layoutItemAtIndexPath:indexPath];
         IBPNSCollectionLayoutSize *layoutSize = layoutItem.layoutSize;
-        if (layoutSize.widthDimension.isEstimated || layoutSize.heightDimension.isEstimated) {
+        if ((layoutSize.widthDimension.isEstimated || layoutSize.heightDimension.isEstimated) && [calculatedEstimates containsObject:indexPath] == NO) {
             UICollectionViewCell *cell = [self.collectionView.dataSource collectionView:self.collectionView cellForItemAtIndexPath:attributes.indexPath];
             if (cell) {
                 CGSize containerSize = self.collectionViewContentSize;
@@ -625,31 +640,46 @@
 
                 CGRect frame = attributes.frame;
                 if (CGRectGetWidth(attributes.frame) != fitSize.width || CGRectGetHeight(attributes.frame) != fitSize.height) {
-                    for (NSInteger j = i + 1; j < itemAttributes.count; j++) {
-                        UICollectionViewLayoutAttributes *nextAttributes = itemAttributes[j];
+                    CGRect lastFrame = frame;
+                    lastFrame.size = fitSize;
+
+                    for (NSInteger j = i + 1; j < allAttributes.count; j++) {
+                        UICollectionViewLayoutAttributes *nextAttributes = allAttributes[j];
                         CGRect nextFrame = nextAttributes.frame;
+                        lastFrame = nextFrame;
 
                         switch (self.scrollDirection) {
                             case UICollectionViewScrollDirectionVertical:
                                 if (CGRectGetMinY(nextFrame) > CGRectGetMinY(frame) && CGRectGetMaxX(nextFrame) > CGRectGetMinX(frame) && CGRectGetMinX(nextFrame) < CGRectGetMaxX(frame)) {
-                                    nextFrame.origin.y += fitSize.height - CGRectGetHeight(nextFrame) + layoutItem.edgeSpacing.bottom.spacing;
+                                    nextFrame.origin.y += fitSize.height - CGRectGetHeight(frame) + layoutItem.edgeSpacing.bottom.spacing;
                                 }
                                 break;
                             case UICollectionViewScrollDirectionHorizontal:
                                 if (CGRectGetMinX(nextFrame) > CGRectGetMinX(frame) && CGRectGetMaxY(nextFrame) > CGRectGetMinY(frame) && CGRectGetMinY(nextFrame) < CGRectGetMaxY(frame)) {
-                                    nextFrame.origin.x += fitSize.width - CGRectGetWidth(nextFrame) + layoutItem.edgeSpacing.trailing.spacing;
+                                    nextFrame.origin.x += fitSize.width - CGRectGetWidth(frame) + layoutItem.edgeSpacing.trailing.spacing;
                                 }
                                 break;
                         }
                         nextAttributes.frame = nextFrame;
+                    }
+
+                    IBPNSCollectionLayoutSection *lastLayoutSection = solvers.lastObject.layoutSection;
+                    IBPNSDirectionalEdgeInsets insets = lastLayoutSection.contentInsets;
+                    lastFrame.size.height += insets.bottom;
+                    lastFrame.size.width += insets.trailing;
+
+                    if (CGRectContainsRect(contentFrame, lastFrame)) {
+                        CGFloat yDiff = CGRectGetMaxY(contentFrame) - CGRectGetMaxY(lastFrame);
+                        CGFloat xDiff = CGRectGetMaxX(contentFrame) - CGRectGetMaxX(lastFrame);
+                        contentFrame = UIEdgeInsetsInsetRect(contentFrame, UIEdgeInsetsMake(0, 0, yDiff, xDiff));
+                    } else {
+                        contentFrame = CGRectUnion(contentFrame, lastFrame);
                     }
                 }
 
                 frame.size = fitSize;
                 attributes.frame = frame;
                 [layoutAttributes addObject:attributes];
-
-                contentFrame = CGRectUnion(contentFrame, frame);
 
                 NSMutableDictionary<NSString *, UICollectionViewLayoutAttributes *> *supplementaryAttributes = cachedSupplementaryAttributes;
                 [layoutItem enumerateSupplementaryItemsWithHandler:^(IBPNSCollectionLayoutSupplementaryItem * _Nonnull supplementaryItem, BOOL * _Nonnull stop) {
@@ -667,6 +697,7 @@
                     [layoutAttributes addObject:attributes];
                 }];
 
+                [calculatedEstimates addObject:indexPath];
                 continue;
             }
         }
@@ -823,6 +854,11 @@
     }
 
     return !CGSizeEqualToSize(newBounds.size, self.collectionView.bounds.size);
+}
+
+- (void)invalidateLayout {
+    [self resetState];
+    [super invalidateLayout];
 }
 
 - (CGSize)collectionViewContentSize {
